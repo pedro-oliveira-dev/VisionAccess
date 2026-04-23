@@ -32,8 +32,12 @@ Este é o MVP (Minimum Viable Product) da plataforma **VisionAccess**, desenvolv
     *   Ajuste as variáveis `$host`, `$dbname`, `$username` e `$password` conforme as configurações do seu ambiente local (ex: XAMPP, WAMP).
 
 3.  **Servidor Web:**
-    *   Coloque a pasta `visionaccess` no diretório raiz do seu servidor web (ex: `htdocs` no XAMPP).
-    *   Acesse via navegador: `http://localhost/visionaccess/`.
+    *   Coloque a pasta `visionaccess_mvp` no diretório raiz do seu servidor web (ex: `htdocs` no XAMPP).
+    *   Acesse via navegador: `http://localhost/visionaccess_mvp/`.
+
+4. **Configuração da API**
+   *   Em `includes/config.php`, coloque sua chave de API do Gemini dentro de `define('GEMINI_API_KEY', '');`.
+   *   É possível gerar uma chave de API gratuitamente em https://aistudio.google.com/ com limitação de 20 requisições por dia.
 
 ## Recursos de Acessibilidade
 
