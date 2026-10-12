@@ -5,6 +5,8 @@ if (isset($_SESSION['user_id'])) {
     exit();
 }
 include 'includes/header.php';
+
+
 ?>
 
 <div class="row justify-content-center">
@@ -37,9 +39,6 @@ include 'includes/header.php';
                         <button type="submit" class="btn btn-primary btn-lg">Entrar</button>
                     </div>
                     <div class="text-center">
-                        <!--Ainda não implementado!-->
-                        <a href="forgot_password.php" class="text-decoration-none">Esqueceu a senha?</a>
-                        <hr>
                         <p class="mb-0">Não tem uma conta? <a href="cadastro.php" class="text-decoration-none">Cadastre-se</a></p>
                     </div>
                 </form>

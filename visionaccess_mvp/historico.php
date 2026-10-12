@@ -1,18 +1,15 @@
 <?php
 session_start();
-
 if (!isset($_SESSION['user_id'])) {
-    header("Location: index.php");
+    header('Location: index.php');
     exit();
 }
 
 require_once 'includes/db_connect.php';
 include 'includes/header.php';
 
-// Buscar histórico de triagens do usuário considerando o novo banco de dados.
-// Agora a tabela resultado possui campos separados para IA, regra interna e resultado final.
 $stmt = $pdo->prepare("
-    SELECT 
+    SELECT
         t.id_triagem,
         t.data_triagem,
         r.resultado_final,
@@ -20,6 +17,7 @@ $stmt = $pdo->prepare("
         r.confianca_ia,
         r.classificacao_interna,
         r.pontuacao_interna,
+        r.percentual_interno,
         r.nivel_risco
     FROM triagem t
     LEFT JOIN resultado r ON t.id_triagem = r.id_triagem
@@ -35,9 +33,7 @@ $triagens = $stmt->fetchAll(PDO::FETCH_ASSOC);
         <div class="card shadow-sm border-0">
             <div class="card-body p-4">
                 <h2 class="text-center mb-4">Histórico de Triagens</h2>
-                <p class="text-muted text-center mb-4">
-                    Acompanhe suas triagens anteriores, incluindo o resultado da IA e a análise interna por pontuação.
-                </p>
+                <p class="text-muted text-center mb-4">Acompanhe suas triagens anteriores, incluindo a análise da IA e a regra interna.</p>
 
                 <?php if (empty($triagens)): ?>
                     <div class="alert alert-info text-center py-5">
@@ -61,85 +57,50 @@ $triagens = $stmt->fetchAll(PDO::FETCH_ASSOC);
                             <tbody>
                                 <?php foreach ($triagens as $triagem): ?>
                                     <tr>
-                                        <td>
-                                            <?php echo date('d/m/Y H:i', strtotime($triagem['data_triagem'])); ?>
-                                        </td>
-
+                                        <td><?php echo date('d/m/Y H:i', strtotime($triagem['data_triagem'])); ?></td>
                                         <td>
                                             <?php if (!empty($triagem['resultado_final'])): ?>
-                                                <span class="badge bg-primary px-3 py-2">
-                                                    <?php echo htmlspecialchars($triagem['resultado_final']); ?>
-                                                </span>
-                                            <?php elseif (!empty($triagem['classificacao_ia']) || !empty($triagem['classificacao_interna'])): ?>
-                                                <span class="badge bg-secondary px-3 py-2">
-                                                    <?php 
-                                                        echo htmlspecialchars(
-                                                            $triagem['classificacao_ia'] 
-                                                            ?? $triagem['classificacao_interna'] 
-                                                            ?? 'Resultado parcial'
-                                                        ); 
-                                                    ?>
-                                                </span>
+                                                <span class="badge bg-primary px-3 py-2"><?php echo htmlspecialchars($triagem['resultado_final']); ?></span>
                                             <?php else: ?>
                                                 <span class="badge bg-warning text-dark px-3 py-2">Pendente</span>
                                             <?php endif; ?>
                                         </td>
-
+                                        <td><?php echo !empty($triagem['classificacao_ia']) ? htmlspecialchars($triagem['classificacao_ia']) : '-'; ?></td>
                                         <td>
-                                            <?php if (!empty($triagem['classificacao_ia'])): ?>
-                                                <?php echo htmlspecialchars($triagem['classificacao_ia']); ?>
-                                            <?php else: ?>
-                                                -
-                                            <?php endif; ?>
+                                            <?php echo ($triagem['confianca_ia'] !== null && $triagem['confianca_ia'] !== '') ? number_format((float) $triagem['confianca_ia'], 2, ',', '.') . '%' : '-'; ?>
                                         </td>
-
-                                        <td>
-                                            <?php if ($triagem['confianca_ia'] !== null && $triagem['confianca_ia'] !== ''): ?>
-                                                <?php echo number_format((float)$triagem['confianca_ia'], 2, ',', '.'); ?>%
-                                            <?php else: ?>
-                                                -
-                                            <?php endif; ?>
-                                        </td>
-
                                         <td>
                                             <?php if (!empty($triagem['classificacao_interna'])): ?>
                                                 <?php echo htmlspecialchars($triagem['classificacao_interna']); ?>
-                                                <?php if ($triagem['pontuacao_interna'] !== null && $triagem['pontuacao_interna'] !== ''): ?>
-                                                    <small class="text-muted">
-                                                        (<?php echo (int)$triagem['pontuacao_interna']; ?> pts)
-                                                    </small>
+                                                <?php if ($triagem['percentual_interno'] !== null && $triagem['percentual_interno'] !== ''): ?>
+                                                    <small class="text-muted">(<?php echo number_format((float) $triagem['percentual_interno'], 2, ',', '.'); ?>%)</small>
+                                                <?php elseif ($triagem['pontuacao_interna'] !== null && $triagem['pontuacao_interna'] !== ''): ?>
+                                                    <small class="text-muted">(<?php echo (int) $triagem['pontuacao_interna']; ?> pts)</small>
                                                 <?php endif; ?>
                                             <?php else: ?>
                                                 -
                                             <?php endif; ?>
                                         </td>
-
                                         <td>
                                             <?php if (!empty($triagem['nivel_risco'])): ?>
                                                 <?php
-                                                    $classeNivel = 'bg-secondary';
-                                                    $nivel = mb_strtolower($triagem['nivel_risco'], 'UTF-8');
-
-                                                    if ($nivel === 'alto') {
-                                                        $classeNivel = 'bg-danger';
-                                                    } elseif ($nivel === 'moderado') {
-                                                        $classeNivel = 'bg-warning text-dark';
-                                                    } elseif ($nivel === 'baixo') {
-                                                        $classeNivel = 'bg-success';
-                                                    }
+                                                $classeNivel = 'bg-secondary';
+                                                $nivel = mb_strtolower($triagem['nivel_risco'], 'UTF-8');
+                                                if ($nivel === 'alto') {
+                                                    $classeNivel = 'bg-danger';
+                                                } elseif ($nivel === 'moderado') {
+                                                    $classeNivel = 'bg-warning text-dark';
+                                                } elseif ($nivel === 'baixo') {
+                                                    $classeNivel = 'bg-success';
+                                                }
                                                 ?>
-                                                <span class="badge <?php echo $classeNivel; ?> px-3 py-2">
-                                                    <?php echo htmlspecialchars($triagem['nivel_risco']); ?>
-                                                </span>
+                                                <span class="badge <?php echo $classeNivel; ?> px-3 py-2"><?php echo htmlspecialchars($triagem['nivel_risco']); ?></span>
                                             <?php else: ?>
                                                 -
                                             <?php endif; ?>
                                         </td>
-
                                         <td class="text-end">
-                                            <a href="resultado.php?id=<?php echo (int)$triagem['id_triagem']; ?>" class="btn btn-sm btn-outline-primary px-3">
-                                                Ver Detalhes
-                                            </a>
+                                            <a href="resultado.php?id=<?php echo (int) $triagem['id_triagem']; ?>" class="btn btn-sm btn-outline-primary px-3">Ver Detalhes</a>
                                         </td>
                                     </tr>
                                 <?php endforeach; ?>
