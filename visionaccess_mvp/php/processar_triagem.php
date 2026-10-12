@@ -26,20 +26,16 @@ function extrairJsonDaRespostaIA(string $texto): array
 {
     $texto = trim($texto);
 
-    // Remove possíveis blocos markdown do tipo ```json ... ```
     $texto = preg_replace('/^```json\s*/i', '', $texto);
     $texto = preg_replace('/^```\s*/', '', $texto);
     $texto = preg_replace('/\s*```$/', '', $texto);
-
     $texto = trim($texto);
 
-    // Primeira tentativa: decodificar diretamente
     $dados = json_decode($texto, true);
     if (is_array($dados)) {
         return $dados;
     }
 
-    // Segunda tentativa: extrair apenas o trecho entre { e }
     $inicio = strpos($texto, '{');
     $fim = strrpos($texto, '}');
 
@@ -244,62 +240,223 @@ function inserirTriagem(PDO $pdo, int $idUsuario, string $descricaoTexto): int
     return (int) $pdo->lastInsertId();
 }
 
-function buscarPerguntas(PDO $pdo): array
+function buscarPerguntasAtivas(PDO $pdo): array
 {
-    $stmt = $pdo->query("SELECT id_pergunta, tipo FROM pergunta");
-    return $stmt->fetchAll();
+    $stmt = $pdo->query("
+        SELECT id_pergunta
+        FROM pergunta
+        WHERE ativo = TRUE
+    ");
+
+    return $stmt->fetchAll(PDO::FETCH_COLUMN);
 }
 
-function inserirRespostasObjetivas(PDO $pdo, int $idTriagem, array $perguntas, array $postData): void
+function opcaoPertencePergunta(PDO $pdo, int $idPergunta, int $idOpcao): bool
 {
     $sql = "
-        INSERT INTO resposta (id_triagem, id_pergunta, resposta_usuario)
-        VALUES (:id_triagem, :id_pergunta, :resposta_usuario)
+        SELECT COUNT(*)
+        FROM opcao_resposta
+        WHERE id_opcao = :id_opcao
+          AND id_pergunta = :id_pergunta
+    ";
+
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute([
+        ':id_opcao' => $idOpcao,
+        ':id_pergunta' => $idPergunta
+    ]);
+
+    return (int) $stmt->fetchColumn() > 0;
+}
+
+function inserirRespostasObjetivas(PDO $pdo, int $idTriagem, array $perguntasAtivas, array $respostas): void
+{
+    if (empty($respostas)) {
+        throw new Exception('Nenhuma resposta objetiva foi enviada.');
+    }
+
+    $sql = "
+        INSERT INTO resposta (id_triagem, id_pergunta, id_opcao)
+        VALUES (:id_triagem, :id_pergunta, :id_opcao)
     ";
 
     $stmt = $pdo->prepare($sql);
 
-    foreach ($perguntas as $pergunta) {
-        $idPergunta = (int) $pergunta['id_pergunta'];
-        $campo = 'pergunta_' . $idPergunta;
+    foreach ($perguntasAtivas as $idPergunta) {
+        $idPergunta = (int) $idPergunta;
 
-        if (!isset($postData[$campo])) {
+        if (!isset($respostas[$idPergunta])) {
             throw new Exception("A pergunta {$idPergunta} não foi respondida.");
         }
 
-        $respostaUsuario = trim((string) $postData[$campo]);
+        $idOpcao = filter_var($respostas[$idPergunta], FILTER_VALIDATE_INT);
+        if (!$idOpcao) {
+            throw new Exception("A opção selecionada para a pergunta {$idPergunta} é inválida.");
+        }
 
-        if ($respostaUsuario === '') {
-            throw new Exception("A resposta da pergunta {$idPergunta} está vazia.");
+        if (!opcaoPertencePergunta($pdo, $idPergunta, (int) $idOpcao)) {
+            throw new Exception("A opção selecionada não pertence à pergunta {$idPergunta}.");
         }
 
         $stmt->execute([
             ':id_triagem' => $idTriagem,
             ':id_pergunta' => $idPergunta,
-            ':resposta_usuario' => $respostaUsuario
+            ':id_opcao' => (int) $idOpcao
         ]);
     }
 }
 
-function inserirResultadoComProcedure(PDO $pdo, int $idTriagem, string $descricaoTexto, array $resultadoIA): void
+function calcularPontuacaoTriagem(PDO $pdo, int $idTriagem): void
+{
+    $pdo->prepare("DELETE FROM pontuacao_triagem WHERE id_triagem = :id_triagem")
+        ->execute([':id_triagem' => $idTriagem]);
+
+    $sql = "
+        INSERT INTO pontuacao_triagem (id_triagem, id_categoria, pontuacao_total)
+        SELECT
+            r.id_triagem,
+            p.id_categoria,
+            SUM(o.pontuacao) AS pontuacao_total
+        FROM resposta r
+        JOIN pergunta p ON p.id_pergunta = r.id_pergunta
+        JOIN opcao_resposta o ON o.id_opcao = r.id_opcao
+        WHERE r.id_triagem = :id_triagem
+        GROUP BY r.id_triagem, p.id_categoria
+    ";
+
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute([':id_triagem' => $idTriagem]);
+}
+
+function buscarClassificacaoInterna(PDO $pdo, int $idTriagem): array
+{
+    $sql = "
+        SELECT
+            c.nome AS classificacao_interna,
+            pt.pontuacao_total
+        FROM pontuacao_triagem pt
+        JOIN categoria_triagem c ON c.id_categoria = pt.id_categoria
+        WHERE pt.id_triagem = :id_triagem
+        ORDER BY pt.pontuacao_total DESC, c.nome ASC
+        LIMIT 1
+    ";
+
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute([':id_triagem' => $idTriagem]);
+    $linha = $stmt->fetch(PDO::FETCH_ASSOC);
+
+    if (!$linha) {
+        return [
+            'classificacao_interna' => 'Sem indício interno claro',
+            'pontuacao_interna' => 0,
+            'nivel_risco' => 'Baixo'
+        ];
+    }
+
+    $pontuacao = (int) $linha['pontuacao_total'];
+
+    if ($pontuacao >= 7) {
+        $nivelRisco = 'Alto';
+    } elseif ($pontuacao >= 4) {
+        $nivelRisco = 'Moderado';
+    } elseif ($pontuacao >= 1) {
+        $nivelRisco = 'Baixo';
+    } else {
+        $nivelRisco = 'Sem indício relevante';
+    }
+
+    return [
+        'classificacao_interna' => (string) $linha['classificacao_interna'],
+        'pontuacao_interna' => $pontuacao,
+        'nivel_risco' => $nivelRisco
+    ];
+}
+
+function categoriaEsperadaPelaIA(string $classificacaoIA): ?string
+{
+    return match ($classificacaoIA) {
+        'Miopia' => 'Visão de longe',
+        'Hipermetropia', 'Presbiopia' => 'Visão de perto',
+        'Astigmatismo' => 'Astigmatismo',
+        'Condição ocular inespecífica' => 'Condições oculares',
+        default => null
+    };
+}
+
+function montarResultadoFinal(array $resultadoIA, array $resultadoInterno): array
+{
+    $classificacaoIA = $resultadoIA['classificacao'];
+    $classificacaoInterna = $resultadoInterno['classificacao_interna'];
+    $pontuacaoInterna = (int) $resultadoInterno['pontuacao_interna'];
+    $nivelRisco = $resultadoInterno['nivel_risco'];
+
+    $categoriaEsperada = categoriaEsperadaPelaIA($classificacaoIA);
+    $descricaoIA = $resultadoIA['descricao_resultado'];
+    $alerta = $resultadoIA['alerta'];
+
+    if ($classificacaoIA === 'Sem classificação clara') {
+        $resultadoFinal = $classificacaoInterna;
+        $descricaoFinal = "A IA não encontrou uma classificação clara a partir do relato informado. Pelas respostas objetivas, a maior pontuação foi em {$classificacaoInterna}, com {$pontuacaoInterna} ponto(s), indicando nível {$nivelRisco}.\n\n{$alerta}";
+    } elseif ($categoriaEsperada !== null && $categoriaEsperada === $classificacaoInterna) {
+        $resultadoFinal = $classificacaoIA . ' / ' . $classificacaoInterna;
+        $descricaoFinal = "A análise da IA indicou {$classificacaoIA}. As respostas objetivas também apontaram maior pontuação em {$classificacaoInterna}, com {$pontuacaoInterna} ponto(s), indicando nível {$nivelRisco}.\n\n{$descricaoIA}\n\n{$alerta}";
+    } else {
+        $resultadoFinal = $classificacaoIA . ' com indicativo interno de ' . $classificacaoInterna;
+        $descricaoFinal = "A análise da IA indicou {$classificacaoIA}. Porém, pelas respostas objetivas, a maior pontuação foi em {$classificacaoInterna}, com {$pontuacaoInterna} ponto(s), indicando nível {$nivelRisco}. O sistema apresenta os dois indicativos como triagem orientativa.\n\n{$descricaoIA}\n\n{$alerta}";
+    }
+
+    return [
+        'resultado_final' => $resultadoFinal,
+        'descricao_resultado' => $descricaoFinal
+    ];
+}
+
+function inserirResultadoFinal(PDO $pdo, int $idTriagem, string $descricaoTexto, array $resultadoIA, array $resultadoInterno, array $resultadoCombinado): void
 {
     $respostaIaCompleta = [
         'entrada_usuario' => $descricaoTexto,
         'saida_ia' => $resultadoIA
     ];
 
-    $descricaoFinal = $resultadoIA['descricao_resultado'] . "\n\n" . $resultadoIA['alerta'];
-
-    $sql = "CALL inserir_resultado(:p_id_triagem, :p_classificacao, :p_confianca, :p_descricao, :p_resposta_ia)";
+    $sql = "
+        INSERT INTO resultado (
+            id_triagem,
+            classificacao_ia,
+            confianca_ia,
+            descricao_ia,
+            resposta_ia,
+            classificacao_interna,
+            pontuacao_interna,
+            nivel_risco,
+            resultado_final,
+            descricao_resultado
+        ) VALUES (
+            :id_triagem,
+            :classificacao_ia,
+            :confianca_ia,
+            :descricao_ia,
+            :resposta_ia,
+            :classificacao_interna,
+            :pontuacao_interna,
+            :nivel_risco,
+            :resultado_final,
+            :descricao_resultado
+        )
+    ";
 
     $stmt = $pdo->prepare($sql);
-    $stmt->bindValue(':p_id_triagem', $idTriagem, PDO::PARAM_INT);
-    $stmt->bindValue(':p_classificacao', $resultadoIA['classificacao'], PDO::PARAM_STR);
-    $stmt->bindValue(':p_confianca', $resultadoIA['confianca']);
-    $stmt->bindValue(':p_descricao', $descricaoFinal, PDO::PARAM_STR);
-    $stmt->bindValue(':p_resposta_ia', json_encode($respostaIaCompleta, JSON_UNESCAPED_UNICODE), PDO::PARAM_STR);
-    $stmt->execute();
-    $stmt->closeCursor();
+    $stmt->execute([
+        ':id_triagem' => $idTriagem,
+        ':classificacao_ia' => $resultadoIA['classificacao'],
+        ':confianca_ia' => $resultadoIA['confianca'],
+        ':descricao_ia' => $resultadoIA['descricao_resultado'],
+        ':resposta_ia' => json_encode($respostaIaCompleta, JSON_UNESCAPED_UNICODE),
+        ':classificacao_interna' => $resultadoInterno['classificacao_interna'],
+        ':pontuacao_interna' => $resultadoInterno['pontuacao_interna'],
+        ':nivel_risco' => $resultadoInterno['nivel_risco'],
+        ':resultado_final' => $resultadoCombinado['resultado_final'],
+        ':descricao_resultado' => $resultadoCombinado['descricao_resultado']
+    ]);
 }
 
 try {
@@ -313,21 +470,28 @@ try {
 
     $idUsuario = (int) $_SESSION['user_id'];
     $descricaoTexto = trim($_POST['descricao_texto'] ?? '');
+    $respostas = $_POST['respostas'] ?? [];
 
     if ($descricaoTexto === '') {
         redirecionarComErro('A descrição dos sintomas é obrigatória.');
     }
 
-    $perguntas = buscarPerguntas($pdo);
+    if (!is_array($respostas)) {
+        redirecionarComErro('Formato inválido das respostas objetivas.');
+    }
 
-    if (!$perguntas) {
+    $perguntasAtivas = buscarPerguntasAtivas($pdo);
+
+    if (!$perguntasAtivas) {
         throw new Exception('Nenhuma pergunta cadastrada foi encontrada.');
     }
 
     $pdo->beginTransaction();
 
     $idTriagem = inserirTriagem($pdo, $idUsuario, $descricaoTexto);
-    inserirRespostasObjetivas($pdo, $idTriagem, $perguntas, $_POST);
+    inserirRespostasObjetivas($pdo, $idTriagem, $perguntasAtivas, $respostas);
+    calcularPontuacaoTriagem($pdo, $idTriagem);
+    $resultadoInterno = buscarClassificacaoInterna($pdo, $idTriagem);
 
     try {
         $resultadoBrutoIA = analisarSintomasComGemini($descricaoTexto);
@@ -337,7 +501,8 @@ try {
         $resultadoFinalIA = gerarResultadoFallback($e->getMessage());
     }
 
-    inserirResultadoComProcedure($pdo, $idTriagem, $descricaoTexto, $resultadoFinalIA);
+    $resultadoCombinado = montarResultadoFinal($resultadoFinalIA, $resultadoInterno);
+    inserirResultadoFinal($pdo, $idTriagem, $descricaoTexto, $resultadoFinalIA, $resultadoInterno, $resultadoCombinado);
 
     $pdo->commit();
 
